@@ -1,0 +1,36 @@
+{
+    "architecture": "simple_udit",
+    "autoencoder": "stable_diffusion",
+    "autoencoder_opts": {
+      "modelname": "pcuenq/sd-vae-ft-mse-flax"
+    },
+    "noise_schedule": "edm",
+    "input_config": {
+      "sample_data_key": "image",
+      "sample_data_shape": [256, 256, 3],
+      "conditions": [
+        {
+          "conditioning_data_key": "text",
+          "pretokenized": true,
+          "unconditional_input": "",
+          "model_key_override": "textcontext"
+        }
+      ]
+    },
+    "model": {
+      "activation": "jax._src.nn.functions.silu",
+      "dropout_rate": 0.1,
+      "dtype": "jax.numpy.float32",
+      "emb_features": 512,
+      "mlp_ratio": 4,
+      "norm_groups": 0,
+      "num_heads": 8,
+      "num_layers": 16,
+      "output_channels": 4,
+      "patch_size": 2,
+      "precision": "DEFAULT",
+      "use_flash_attention": false,
+      "use_hilbert": false
+    }
+  }
+  

@@ -1,0 +1,21 @@
+# Symlinks to local repos (submodules defined in .gitmodules)
+flaxdiff
+tpu-tools
+
+# Large files
+*.png
+*.jpg
+*.jpeg
+report/interim_report/figures/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

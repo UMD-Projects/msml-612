@@ -1,0 +1,112 @@
+method: bayes
+metric:
+  goal: minimize
+  name: val/clip_similarity
+parameters:
+  learning_rate:
+    max: 0.001
+    min: 0.000001
+    distribution: uniform
+  architecture:
+    values:
+      - unet
+    distribution: categorical
+  batch_size:
+    values:
+      - 32
+    distribution: categorical
+  add_residualblock_output:
+    values:
+      - "true"
+      - "false"
+    distribution: categorical
+  num_middle_res_blocks:
+    max: 2
+    min: 1
+    distribution: int_uniform
+  only_pure_attention:
+    values:
+      - "true"
+      - "false"
+    distribution: categorical
+  use_self_and_cross:
+    values:
+      - "true"
+      - "false"
+    distribution: categorical
+  use_dynamic_scale:
+    values:
+      - "true"
+    distribution: categorical
+  experiment_name:
+    values:
+      - sweep-dataset-{dataset}/image_size-{image_size}/batch-{batch_size}/schd-{noise_schedule}/dtype-{dtype}/arch-{architecture}/lr-{learning_rate}/resblks-{num_res_blocks}/emb-{emb_features}/pure-attn-{only_pure_attention}/
+    distribution: categorical
+  attention_heads:
+    max: 16
+    min: 4
+    distribution: int_uniform
+  use_projection:
+    values:
+      - "false"
+    distribution: categorical
+  num_res_blocks:
+    max: 3
+    min: 1
+    distribution: int_uniform
+  noise_schedule:
+    values:
+      - edm
+    distribution: categorical
+  checkpoint_dir:
+    values:
+      - ./checkpoints/
+    distribution: categorical
+  wandb_project:
+    values:
+      - mlops-msml605-project
+    distribution: categorical
+  checkpoint_fs:
+    values:
+      - local
+    distribution: categorical
+  wandb_entity:
+    values:
+      - umd-projects
+    distribution: categorical
+  emb_features:
+    values:
+      - 128
+      - 256
+      - 512
+      - 768
+    distribution: categorical
+  named_norms:
+    values:
+      - "true"
+    distribution: categorical
+  precision:
+    values:
+      - default
+    distribution: categorical
+  dataset:
+    values:
+      - oxford_flowers102
+    distribution: categorical
+  epochs:
+    values:
+      - 200
+    distribution: categorical
+  dtype:
+    values:
+      - bfloat16
+      - float32
+    distribution: categorical
+
+program: training.py
+
+command:
+  - ${env}
+  - python3
+  - ${program}
+  - ${args}

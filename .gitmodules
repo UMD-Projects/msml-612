@@ -1,0 +1,6 @@
+[submodule "flaxdiff"]
+	path = flaxdiff
+	url = git@github.com:AshishKumar4/FlaxDiff.git
+[submodule "tpu-tools"]
+	path = tpu-tools
+	url = git@github.com:AshishKumar4/tpu-tools.git

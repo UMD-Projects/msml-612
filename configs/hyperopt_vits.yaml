@@ -1,0 +1,136 @@
+method: bayes
+metric:
+  goal: minimize
+  name: val/clip_similarity
+parameters:
+  learning_rate:
+    values:
+      - 0.0003  # No need for a uniform dist here, based on our previous experiments, these levels works well
+      - 0.0001
+    distribution: categorical
+  architecture:
+    values:
+      - "uvit"
+      - "simple_dit"
+      - "simple_mmdit"
+    distribution: categorical
+  batch_size:
+    values:
+      - 128
+    distribution: categorical
+  use_self_and_cross:
+    values:
+      - "true"
+    distribution: categorical
+  experiment_name:
+    values:
+      - sweep-dataset-{dataset}/image_size-{image_size}/batch-{batch_size}/schd-{noise_schedule}/dtype-{dtype}/arch-{architecture}/lr-{learning_rate}/resblks-{num_res_blocks}/emb-{emb_features}/pure-attn-{only_pure_attention}/
+    distribution: categorical
+  use_projection:
+    values:
+      - "false"
+    distribution: categorical
+  num_heads:
+    values:
+      - 8
+    distribution: categorical
+  num_layers:
+    values:
+      - 12
+      - 16
+    distribution: categorical
+  norm_groups:
+    values:
+      - 0
+    distribution: categorical
+  patch_size:
+    values:
+      - 2
+    distribution: categorical
+  use_hilbert:
+    values:
+      - "true"
+      - "false"
+    distribution: categorical
+  noise_schedule:
+    values:
+      - edm
+    distribution: categorical
+  checkpoint_dir:
+    values:
+      - ./checkpoints/
+    distribution: categorical
+  wandb_project:
+    values:
+      - mlops-msml605-project
+    distribution: categorical
+  checkpoint_fs:
+    values:
+      - local
+    distribution: categorical
+  wandb_entity:
+    values:
+      - umd-projects
+    distribution: categorical
+  emb_features:
+    values:
+      - 512
+    distribution: categorical
+  named_norms:
+    values:
+      - "true"
+    distribution: categorical
+  precision:
+    values:
+      - default
+    distribution: categorical
+  dataset:
+    values:
+      - "laiona_coco"
+    distribution: categorical
+  epochs:
+    values:
+      - 10
+    distribution: categorical
+  dtype:
+    values:
+      - float32
+    distribution: categorical
+  clip_grads:
+    values:
+      - 0.5
+    distribution: categorical
+  image_size:
+    values:
+      - 256
+    distribution: categorical
+  autoencoder:
+    values:
+      - "stable_diffusion"
+    distribution: categorical
+  steps_per_epoch:
+    values:
+      - 50000
+    distribution: categorical
+  val_steps_per_epoch:
+    values:
+      - 4 # This is just for our train time validation to make things faster. Anyways 4 * 128 is good enough
+    distribution: categorical
+
+# Added early_terminate section for Hyperband
+early_terminate:
+  type: hyperband
+  # max_iter: Maximum resource (e.g., epochs) allocated to a single configuration.
+  max_iter: 10
+  # min_iter: Minimum resource (e.g., epochs) to run before potentially stopping.
+  min_iter: 3
+  # eta: Halving rate for Hyperband (default is 3).
+  eta: 3
+
+program: training.py
+
+command:
+  - ${env}
+  - python3
+  - ${program}
+  - ${args}
