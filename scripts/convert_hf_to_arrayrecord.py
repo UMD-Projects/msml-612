@@ -44,10 +44,9 @@ def pack_dict_of_byte_arrays(data_dict):
     return bytes(packed_data)
 
 
-def image_to_jpeg(image_bytes_or_pil, quality=95):
-    """Convert any image (PIL or bytes) to JPEG bytes via cv2."""
+def image_to_jpeg(image_bytes_or_pil, quality=95, target_size=256, max_aspect_ratio=2.4, min_size=100):
+    """Convert any image (PIL or bytes) to JPEG bytes via cv2. Resizes to target_size preserving aspect ratio."""
     if hasattr(image_bytes_or_pil, 'save'):
-        # PIL Image
         arr = np.array(image_bytes_or_pil)
     elif isinstance(image_bytes_or_pil, bytes):
         arr = cv2.imdecode(np.frombuffer(image_bytes_or_pil, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
@@ -61,6 +60,25 @@ def image_to_jpeg(image_bytes_or_pil, quality=95):
         arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
     elif arr.shape[2] == 3:
         arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+    h, w = arr.shape[:2]
+    if min(h, w) < min_size:
+        return None
+    if max(h, w) / min(h, w) > max_aspect_ratio:
+        return None
+
+    # Resize: scale so smaller dim == target_size, then center crop
+    if h < w:
+        new_h = target_size
+        new_w = int(w * target_size / h)
+    else:
+        new_w = target_size
+        new_h = int(h * target_size / w)
+    arr = cv2.resize(arr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    y0 = (new_h - target_size) // 2
+    x0 = (new_w - target_size) // 2
+    arr = arr[y0:y0+target_size, x0:x0+target_size]
+
     _, encoded = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return encoded.tobytes()
 
@@ -92,141 +110,290 @@ def flush_shard(shard_id, records, output_folder, tmp_dir, oom_shard_count=5):
 # ---- DiffusionDB: batched zip download ----
 
 def convert_diffusiondb(args):
-    """DiffusionDB stores images as zip files. Download in batches, convert, upload."""
+    """DiffusionDB stores images as zip files at images/part-XXXXXX.zip.
+
+    Each zip contains ~1000 PNG images + one JSON file with prompts/metadata.
+    Downloads one zip at a time, extracts, packs into ArrayRecord shards, uploads to GCS.
+    """
     from huggingface_hub import hf_hub_download
     import shutil
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     REPO = "poloclub/diffusiondb"
-    NUM_PARTS = 2000  # 2M images across 2000 zip parts
+    NUM_PARTS = 2000  # 2M images across 2000 zip parts (part-000001 through part-002000)
 
     shard_id, records, total_written, total_skipped, total_bytes = 0, [], 0, 0, 0
     start_time = time.time()
+    num_workers = getattr(args, 'workers', 32)
 
-    for batch_start in range(1, NUM_PARTS + 1, args.zip_batch_size):
-        batch_end = min(batch_start + args.zip_batch_size, NUM_PARTS + 1)
-        print(f"\n--- Parts {batch_start}-{batch_end-1} ---", flush=True)
+    for part_id in range(1, NUM_PARTS + 1):
+        part_name = f"part-{part_id:06d}"
+        zip_filename = f"images/{part_name}.zip"
 
-        for part_id in range(batch_start, batch_end):
-            part_name = f"part-{part_id:06d}"
+        # Download zip with automatic retry
+        try:
+            zip_path = hf_hub_download(
+                repo_id=REPO, repo_type="dataset",
+                filename=zip_filename, cache_dir=args.tmp_dir,
+                force_download=False,
+            )
+        except Exception as e:
+            print(f"[{part_id}/{NUM_PARTS}] SKIP {part_name}: download error: {str(e)[:80]}", flush=True)
+            continue
+
+        # Extract zip contents
+        try:
+            zf = zipfile.ZipFile(zip_path, 'r')
+        except Exception as e:
+            print(f"[{part_id}/{NUM_PARTS}] SKIP {part_name}: zip error: {str(e)[:80]}", flush=True)
+            continue
+
+        # Find the JSON metadata file inside the zip
+        names = zf.namelist()
+        json_names = [n for n in names if n.endswith('.json')]
+        metadata = {}
+        if json_names:
             try:
-                zip_path = hf_hub_download(repo_id=REPO, repo_type="dataset",
-                    filename=f"images/{part_name}/{part_name}.zip", cache_dir=args.tmp_dir)
-                json_path = hf_hub_download(repo_id=REPO, repo_type="dataset",
-                    filename=f"images/{part_name}/{part_name}.json", cache_dir=args.tmp_dir)
-            except Exception as e:
-                print(f"  Skip {part_name}: {e}", flush=True)
-                continue
-
-            try:
-                with open(json_path) as f:
+                with zf.open(json_names[0]) as f:
                     metadata = json.load(f)
             except Exception:
                 metadata = {}
 
+        # Collect image entries for parallel processing
+        img_names = [n for n in names if n.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+
+        def process_one(img_name):
             try:
-                with zipfile.ZipFile(zip_path, 'r') as zf:
-                    for img_name in zf.namelist():
-                        if not img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                            continue
-                        try:
-                            jpg_bytes = image_to_jpeg(zf.read(img_name), quality=args.jpeg_quality)
-                            if jpg_bytes is None:
-                                total_skipped += 1
-                                continue
-                            meta_entry = metadata.get(img_name, {})
-                            caption = str(meta_entry.get("p", ""))
-                            meta = {k: meta_entry[k] for k in ["se", "c", "st", "sa"] if k in meta_entry}
+                img_bytes = zf.read(img_name)
+                jpg_bytes = image_to_jpeg(img_bytes, quality=args.jpeg_quality)
+                if jpg_bytes is None:
+                    return None
+                meta_entry = metadata.get(img_name, {})
+                caption = str(meta_entry.get("p", ""))
+                meta = {k: meta_entry[k] for k in ["se", "c", "st", "sa"] if k in meta_entry}
+                return pack_dict_of_byte_arrays({
+                    "key": f"diffdb_{part_id}_{img_name}".encode("utf-8"),
+                    "jpg": jpg_bytes,
+                    "txt": caption.encode("utf-8"),
+                    "meta": json.dumps(meta).encode("utf-8"),
+                })
+            except Exception:
+                return None
 
-                            records.append(pack_dict_of_byte_arrays({
-                                "key": f"diffdb_{part_id}_{img_name}".encode("utf-8"),
-                                "jpg": jpg_bytes,
-                                "txt": caption.encode("utf-8"),
-                                "meta": json.dumps(meta).encode("utf-8"),
-                            }))
-                            total_written += 1
+        with ThreadPoolExecutor(max_workers=num_workers) as ex:
+            results = list(ex.map(process_one, img_names))
 
-                            if len(records) >= args.samples_per_shard:
-                                fsize = flush_shard(shard_id, records, args.output_folder, args.tmp_dir)
-                                total_bytes += fsize
-                                elapsed = time.time() - start_time
-                                print(f"  Shard {shard_id}: {fsize/1e6:.0f}MB -> GCS "
-                                      f"({total_written:,} total, {total_written/elapsed:.1f}/s)", flush=True)
-                                shard_id += 1
-                                records = []
-                        except Exception:
-                            total_skipped += 1
-            except Exception as e:
-                print(f"  Zip error {part_name}: {e}", flush=True)
+        for r in results:
+            if r is not None:
+                records.append(r)
+                total_written += 1
+            else:
+                total_skipped += 1
 
-        # Clean HF cache for this batch
-        cache_path = os.path.join(args.tmp_dir, "datasets--poloclub--diffusiondb")
-        if os.path.exists(cache_path):
-            shutil.rmtree(cache_path, ignore_errors=True)
+        zf.close()
+
+        # Flush shards as they fill
+        while len(records) >= args.samples_per_shard:
+            fsize = flush_shard(shard_id, records[:args.samples_per_shard],
+                                args.output_folder, args.tmp_dir)
+            records = records[args.samples_per_shard:]
+            total_bytes += fsize
+            elapsed = time.time() - start_time
+            print(f"  Shard {shard_id}: {fsize/1e6:.0f}MB -> GCS "
+                  f"({total_written:,} total, {total_written/elapsed:.1f}/s)", flush=True)
+            shard_id += 1
+
+        # Delete local zip after processing
+        try:
+            os.remove(zip_path)
+        except Exception:
+            pass
 
         elapsed = time.time() - start_time
         rate = total_written / max(elapsed, 1)
-        eta_h = (2_000_000 - total_written) / max(rate, 0.1) / 3600
-        print(f"  Batch done: {total_written:,} written, {total_skipped} skipped, "
-              f"{rate:.1f}/s, ETA {eta_h:.1f}h", flush=True)
+        print(f"[{part_id}/{NUM_PARTS}] {part_name}: {len(img_names)} imgs processed, "
+              f"total_written={total_written:,}, rate={rate:.1f}/s", flush=True)
+
+        # Clean HF cache blobs periodically
+        if part_id % 20 == 0:
+            cache_blobs = os.path.join(args.tmp_dir, "datasets--poloclub--diffusiondb", "blobs")
+            if os.path.exists(cache_blobs):
+                shutil.rmtree(cache_blobs, ignore_errors=True)
 
     return shard_id, records, total_written, total_skipped, total_bytes
 
 
 # ---- Generic HF dataset: streaming ----
 
-def convert_hf_streaming(args):
-    """Generic HF dataset with image + text columns. Streams one sample at a time."""
-    from datasets import load_dataset
+def _process_sample(sample, image_col, text_col, jpeg_quality, dataset_name, idx):
+    """Process a single sample — designed for use with multiprocessing."""
+    try:
+        img = sample.get(image_col)
+        if img is None:
+            return None
+        jpg_bytes = image_to_jpeg(img, quality=jpeg_quality)
+        if jpg_bytes is None:
+            return None
+        caption = str(sample.get(text_col, ""))
+        meta = {}
+        for k in ["seed", "step", "cfg", "sampler", "width", "height", "key", "sha256"]:
+            v = sample.get(k)
+            if v is not None and isinstance(v, (int, float, str, bool)):
+                meta[k] = v
+        return pack_dict_of_byte_arrays({
+            "key": f"{dataset_name}_{idx}".encode("utf-8"),
+            "jpg": jpg_bytes,
+            "txt": caption.encode("utf-8"),
+            "meta": json.dumps(meta).encode("utf-8"),
+        })
+    except Exception:
+        return None
 
+
+def convert_hf_batch_download(args):
+    """Download parquet files from HF one at a time, process locally, upload shards.
+
+    Much more reliable than streaming — each file is an independent download with retries.
+    No persistent connection needed.
+    """
+    from huggingface_hub import HfApi, hf_hub_download
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import pandas as pd
+    from PIL import Image
+
+    num_workers = getattr(args, 'workers', 32)
+    api = HfApi()
+    dataset_name = args.dataset.split('/')[-1]
+
+    # List all parquet files in the repo
+    print("Listing parquet files in repo...", flush=True)
+    all_files = []
+    try:
+        for item in api.list_repo_tree(args.dataset, repo_type="dataset",
+                                        path_in_repo="", recursive=True):
+            if hasattr(item, 'rfilename') and item.rfilename.endswith('.parquet'):
+                all_files.append(item)
+    except Exception as e:
+        print(f"Error listing repo: {e}", flush=True)
+        # Fallback: try loading with datasets library
+        print("Falling back to streaming mode...", flush=True)
+        return convert_hf_streaming(args)
+
+    print(f"Found {len(all_files)} parquet files, "
+          f"total {sum(f.size for f in all_files)/1e9:.1f}GB", flush=True)
+
+    shard_id, records, total_written, total_skipped, total_bytes = 0, [], 0, 0, 0
+    start_time = time.time()
+    global_idx = 0
+
+    for fi, pq_file in enumerate(all_files):
+        fname = pq_file.rfilename
+        fsize_mb = pq_file.size / 1e6
+
+        # Download parquet file locally
+        print(f"[{fi+1}/{len(all_files)}] Downloading {fname} ({fsize_mb:.0f}MB)...",
+              flush=True, end=" ")
+        try:
+            local_path = hf_hub_download(
+                args.dataset, fname, repo_type="dataset",
+                cache_dir=args.tmp_dir, force_download=False,
+            )
+        except Exception as e:
+            print(f"SKIP (download error: {e})", flush=True)
+            continue
+
+        # Read parquet and process images
+        try:
+            df = pd.read_parquet(local_path)
+        except Exception as e:
+            print(f"SKIP (read error: {e})", flush=True)
+            continue
+
+        print(f"{len(df)} rows. Processing...", flush=True)
+        batch_samples = []
+        for _, row in df.iterrows():
+            sample = row.to_dict()
+            # Handle image column — could be bytes, dict with 'bytes', or path
+            img_data = sample.get(args.image_col)
+            if isinstance(img_data, dict) and 'bytes' in img_data:
+                sample[args.image_col] = img_data['bytes']
+            elif isinstance(img_data, dict) and 'path' in img_data:
+                continue  # Can't resolve path references
+            batch_samples.append((sample, global_idx))
+            global_idx += 1
+
+        # Process batch with thread pool
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [
+                executor.submit(
+                    _process_sample, s, args.image_col, args.text_col,
+                    args.jpeg_quality, dataset_name, idx
+                ) for s, idx in batch_samples
+            ]
+            for f in as_completed(futures):
+                r = f.result()
+                if r is not None:
+                    records.append(r)
+                    total_written += 1
+                else:
+                    total_skipped += 1
+
+        # Flush completed shards
+        while len(records) >= args.samples_per_shard:
+            fsize = flush_shard(shard_id, records[:args.samples_per_shard],
+                                args.output_folder, args.tmp_dir)
+            records = records[args.samples_per_shard:]
+            total_bytes += fsize
+            elapsed = time.time() - start_time
+            print(f"  Shard {shard_id}: {fsize/1e6:.0f}MB -> GCS "
+                  f"({total_written:,} total, {total_written/elapsed:.1f}/s)", flush=True)
+            shard_id += 1
+
+        elapsed = time.time() - start_time
+        rate = total_written / max(elapsed, 1)
+        print(f"  Progress: {total_written:,} written, {total_skipped:,} skipped, "
+              f"{rate:.1f}/s", flush=True)
+
+    return shard_id, records, total_written, total_skipped, total_bytes
+
+
+def convert_hf_streaming(args):
+    """Fallback: stream from HF datasets library."""
+    from datasets import load_dataset
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    num_workers = getattr(args, 'workers', 32)
     ds = load_dataset(args.dataset, args.subset, split=args.split,
                       streaming=True, trust_remote_code=True)
 
     shard_id, records, total_written, total_skipped, total_bytes = 0, [], 0, 0, 0
     start_time = time.time()
+    dataset_name = args.dataset.split('/')[-1]
 
     for i, sample in enumerate(ds):
-        try:
-            img = sample.get(args.image_col)
-            if img is None:
-                total_skipped += 1
-                continue
-            jpg_bytes = image_to_jpeg(img, quality=args.jpeg_quality)
-            if jpg_bytes is None:
-                total_skipped += 1
-                continue
-            caption = str(sample.get(args.text_col, ""))
-            meta = {}
-            for k in ["seed", "step", "cfg", "sampler", "width", "height", "key", "sha256"]:
-                v = sample.get(k)
-                if v is not None and isinstance(v, (int, float, str, bool)):
-                    meta[k] = v
-
-            records.append(pack_dict_of_byte_arrays({
-                "key": f"{args.dataset.split('/')[-1]}_{i}".encode("utf-8"),
-                "jpg": jpg_bytes,
-                "txt": caption.encode("utf-8"),
-                "meta": json.dumps(meta).encode("utf-8"),
-            }))
+        r = _process_sample(sample, args.image_col, args.text_col,
+                            args.jpeg_quality, dataset_name, i)
+        if r is not None:
+            records.append(r)
             total_written += 1
-
-            if len(records) >= args.samples_per_shard:
-                fsize = flush_shard(shard_id, records, args.output_folder, args.tmp_dir)
-                total_bytes += fsize
-                elapsed = time.time() - start_time
-                print(f"Shard {shard_id}: {fsize/1e6:.0f}MB -> GCS "
-                      f"({total_written:,} total, {total_written/elapsed:.1f}/s)", flush=True)
-                shard_id += 1
-                records = []
-
-            if (i + 1) % 5000 == 0:
-                elapsed = time.time() - start_time
-                processed = total_written + len(records)
-                rate = processed / max(elapsed, 1)
-                print(f"  [{i+1:,}] written={total_written:,} buffered={len(records)} "
-                      f"skip={total_skipped} rate={rate:.1f}/s", flush=True)
-
-        except Exception:
+        else:
             total_skipped += 1
+
+        if len(records) >= args.samples_per_shard:
+            fsize = flush_shard(shard_id, records[:args.samples_per_shard],
+                                args.output_folder, args.tmp_dir)
+            records = records[args.samples_per_shard:]
+            total_bytes += fsize
+            elapsed = time.time() - start_time
+            print(f"Shard {shard_id}: {fsize/1e6:.0f}MB -> GCS "
+                  f"({total_written:,} total, {total_written/elapsed:.1f}/s)", flush=True)
+            shard_id += 1
+
+        if (i + 1) % 5000 == 0:
+            elapsed = time.time() - start_time
+            rate = total_written / max(elapsed, 1)
+            print(f"  [{i+1:,}] written={total_written:,} buffered={len(records)} "
+                  f"skip={total_skipped} rate={rate:.1f}/s", flush=True)
 
     return shard_id, records, total_written, total_skipped, total_bytes
 
@@ -243,6 +410,8 @@ if __name__ == "__main__":
     parser.add_argument("--tmp_dir", type=str, default="/tmp/hf_convert_tmp")
     parser.add_argument("--image_col", default="image", help="Image column name in HF dataset")
     parser.add_argument("--text_col", default="prompt", help="Text/caption column name")
+    parser.add_argument("--workers", type=int, default=32,
+                        help="Number of parallel workers for image processing")
     parser.add_argument("--zip_batch_size", type=int, default=50,
                         help="(DiffusionDB only) Zip files per batch")
     args = parser.parse_args()
@@ -256,10 +425,11 @@ if __name__ == "__main__":
     start = time.time()
 
     if args.dataset == "diffusiondb":
-        args.subset = args.subset or "2m_all"
+        # Direct zip batch download (2000 parts of ~633MB each)
         shard_id, records, total_written, total_skipped, total_bytes = convert_diffusiondb(args)
     else:
-        shard_id, records, total_written, total_skipped, total_bytes = convert_hf_streaming(args)
+        # Batch parquet download for generic HF datasets
+        shard_id, records, total_written, total_skipped, total_bytes = convert_hf_batch_download(args)
 
     # Flush remaining
     if records:

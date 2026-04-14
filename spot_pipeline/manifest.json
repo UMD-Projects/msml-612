@@ -1,0 +1,67 @@
+{
+  "_comment": "Source-of-truth list of ablation experiments and their TPU assignments. The supervisor reads this to decide which experiments to launch and watch.",
+  "gcs_bucket": "msml612-diffusion-data",
+  "wandb_project": "umd-projects/msml612-training",
+  "experiments": [
+    {
+      "name": "simple_dit",
+      "description": "DiT baseline (all attention, raster scan)",
+      "tpu_name": "msml612-spot-simple-dit",
+      "zone": "europe-west4-a",
+      "accelerator": "v6e-4",
+      "status": "queued",
+      "wandb_id": null,
+      "expected_steps": 19050
+    },
+    {
+      "name": "simple_dit+hilbert",
+      "description": "DiT + Hilbert (all attention, hilbert scan)",
+      "tpu_name": "msml612-spot-simple-hilbert",
+      "zone": "europe-west4-a",
+      "accelerator": "v6e-4",
+      "status": "queued",
+      "wandb_id": null,
+      "expected_steps": 19050
+    },
+    {
+      "name": "hybrid_dit_3to1",
+      "description": "Hybrid SSM:Attn 3:1, raster scan",
+      "tpu_name": "msml612-spot-hybrid-3to1",
+      "zone": "europe-west4-a",
+      "accelerator": "v6e-4",
+      "status": "queued",
+      "wandb_id": null,
+      "expected_steps": 19050
+    },
+    {
+      "name": "hybrid_dit+hilbert_3to1",
+      "description": "Hybrid SSM:Attn 3:1 + Hilbert (THE NOVEL METHOD)",
+      "tpu_name": "msml612-spot-hybrid-hilbert-3to1",
+      "zone": "europe-west4-a",
+      "accelerator": "v6e-4",
+      "status": "queued",
+      "wandb_id": null,
+      "expected_steps": 19050
+    },
+    {
+      "name": "hybrid_dit+hilbert_1to1",
+      "description": "Hybrid SSM:Attn 1:1 + Hilbert",
+      "tpu_name": "msml612-spot-hybrid-hilbert-1to1",
+      "zone": "europe-west4-a",
+      "accelerator": "v6e-4",
+      "status": "queued",
+      "wandb_id": null,
+      "expected_steps": 19050
+    },
+    {
+      "name": "hybrid_dit+hilbert_all_ssm",
+      "description": "All-SSM + Hilbert",
+      "tpu_name": "msml612-spot-hybrid-hilbert-allssm",
+      "zone": "europe-west4-a",
+      "accelerator": "v6e-4",
+      "status": "queued",
+      "wandb_id": null,
+      "expected_steps": 19050
+    }
+  ]
+}

@@ -10,6 +10,27 @@ set -e
 export PATH=/home/mrwhite0racle/miniconda3/envs/flaxdiff/bin:$PATH
 cd /home/mrwhite0racle/research
 
+# -- Disk management: prevent wandb cache from filling root disk --
+export WANDB_CACHE_DIR=/tmp/wandb-cache
+mkdir -p "$WANDB_CACHE_DIR"
+
+cleanup_wandb_cache() {
+    while true; do
+        usage=$(df / --output=pcent | tail -1 | tr -d ' %')
+        if [ "$usage" -gt 80 ]; then
+            before=$(du -sm "${WANDB_CACHE_DIR}" 2>/dev/null | cut -f1)
+            rm -rf "${WANDB_CACHE_DIR}/artifacts/" 2>/dev/null
+            rm -rf "${HOME}/.cache/wandb/" 2>/dev/null
+            mkdir -p "$WANDB_CACHE_DIR"
+            echo "[$(date)] Cleaned wandb cache (was ${before:-?}MB, disk was ${usage}%)" >> /tmp/disk_watchdog.log
+        fi
+        sleep 300
+    done
+}
+cleanup_wandb_cache &
+WATCHDOG_PID=$!
+trap "kill $WATCHDOG_PID 2>/dev/null" EXIT
+
 run_experiment() {
     local arch="$1"
     shift
@@ -34,8 +55,8 @@ run_experiment() {
       --precision default \
       --only_pure_attention True \
       --distributed_training True \
-      --val_metrics clip \
-      --best_tracker_metric val/clip_similarity \
+      --val_metrics clip clip_score \
+      --best_tracker_metric val/clip_score \
       --wandb_project msml612-training \
       --wandb_entity umd-projects \
       --GRAIN_WORKER_BUFFER_SIZE 100 \
