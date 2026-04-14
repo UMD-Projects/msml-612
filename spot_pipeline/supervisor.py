@@ -127,25 +127,61 @@ class Manifest:
 # ----- Wandb integration -----------------------------------------------------
 
 def find_wandb_run_for_experiment(project: str, experiment_name: str) -> Optional[dict]:
-    """Find the most recent wandb run matching the experiment name."""
+    """Find the most recent (non-`old-`) wandb run matching this experiment.
+
+    Matching strategy:
+    - Map the manifest experiment name to the (architecture, ssm_attention_ratio)
+      pair that the training run will log.
+    - Find the most recent run whose `arch-<architecture>` substring matches
+      AND whose ssm_attention_ratio matches (when applicable).
+    - Use the run's `_step` to confirm it's actually progressing (not just
+      created and crashed immediately).
+    """
     try:
         import wandb
     except ImportError:
         return None
+
+    # Map manifest experiment name → (arch path component, ssm ratio or None)
+    name_to_arch = {
+        "simple_dit":                 ("simple_dit",          None),
+        "simple_dit+hilbert":         ("simple_dit+hilbert",  None),
+        "hybrid_dit_3to1":            ("hybrid_dit",          "3:1"),
+        "hybrid_dit+hilbert_3to1":    ("hybrid_dit+hilbert",  "3:1"),
+        "hybrid_dit+hilbert_1to1":    ("hybrid_dit+hilbert",  "1:1"),
+        "hybrid_dit+hilbert_all_ssm": ("hybrid_dit+hilbert",  "all-ssm"),
+    }
+    if experiment_name not in name_to_arch:
+        return None
+    target_arch, target_ratio = name_to_arch[experiment_name]
+
     api = wandb.Api()
     runs = list(api.runs(project, order="-created_at"))
-    pattern = re.escape(experiment_name).replace(r"\+", r"\+")
+
     for r in runs:
         name = r.name or ""
         if name.startswith("old-"):
             continue
-        if re.search(rf"arch-{pattern}\b", name) or experiment_name.replace("+", "_") in name:
-            return {
-                "id": r.id,
-                "state": r.state,
-                "name": name,
-                "summary": dict(r.summary or {}),
-            }
+
+        # Match `arch-<exact_arch>/` (use trailing slash since name uses path encoding)
+        # so `arch-simple_dit/` doesn't match `arch-simple_dit+hilbert/`.
+        if re.search(rf"arch-{re.escape(target_arch)}/", name) is None:
+            continue
+
+        # If the architecture has an SSM ratio, verify it matches via run config.
+        if target_ratio is not None:
+            cfg_ratio = (r.config or {}).get("ssm_attention_ratio")
+            if cfg_ratio is None:
+                cfg_ratio = (r.config or {}).get("model", {}).get("ssm_attention_ratio")
+            if cfg_ratio != target_ratio:
+                continue
+
+        return {
+            "id": r.id,
+            "state": r.state,
+            "name": name,
+            "summary": dict(r.summary or {}),
+        }
     return None
 
 
@@ -192,7 +228,10 @@ class Supervisor:
         print(f"\n[{time.strftime('%H:%M:%S')}] Supervisor pass")
         for exp in self.manifest.experiments:
             self._step_one(exp)
-        self.manifest.save()
+        if not self.dry_run:
+            self.manifest.save()
+        else:
+            print("  (dry run: manifest NOT saved)")
 
     def _step_one(self, exp: Experiment):
         """Decide what to do with one experiment based on its current state."""

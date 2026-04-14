@@ -9,9 +9,9 @@
       "tpu_name": "msml612-spot-simple-dit",
       "zone": "europe-west4-a",
       "accelerator": "v6e-4",
+      "expected_steps": 19050,
       "status": "queued",
-      "wandb_id": null,
-      "expected_steps": 19050
+      "wandb_id": null
     },
     {
       "name": "simple_dit+hilbert",
@@ -19,9 +19,9 @@
       "tpu_name": "msml612-spot-simple-hilbert",
       "zone": "europe-west4-a",
       "accelerator": "v6e-4",
+      "expected_steps": 19050,
       "status": "queued",
-      "wandb_id": null,
-      "expected_steps": 19050
+      "wandb_id": null
     },
     {
       "name": "hybrid_dit_3to1",
@@ -29,9 +29,9 @@
       "tpu_name": "msml612-spot-hybrid-3to1",
       "zone": "europe-west4-a",
       "accelerator": "v6e-4",
+      "expected_steps": 19050,
       "status": "queued",
-      "wandb_id": null,
-      "expected_steps": 19050
+      "wandb_id": null
     },
     {
       "name": "hybrid_dit+hilbert_3to1",
@@ -39,9 +39,9 @@
       "tpu_name": "msml612-spot-hybrid-hilbert-3to1",
       "zone": "europe-west4-a",
       "accelerator": "v6e-4",
+      "expected_steps": 19050,
       "status": "queued",
-      "wandb_id": null,
-      "expected_steps": 19050
+      "wandb_id": null
     },
     {
       "name": "hybrid_dit+hilbert_1to1",
@@ -49,9 +49,9 @@
       "tpu_name": "msml612-spot-hybrid-hilbert-1to1",
       "zone": "europe-west4-a",
       "accelerator": "v6e-4",
+      "expected_steps": 19050,
       "status": "queued",
-      "wandb_id": null,
-      "expected_steps": 19050
+      "wandb_id": null
     },
     {
       "name": "hybrid_dit+hilbert_all_ssm",
@@ -59,9 +59,9 @@
       "tpu_name": "msml612-spot-hybrid-hilbert-allssm",
       "zone": "europe-west4-a",
       "accelerator": "v6e-4",
+      "expected_steps": 19050,
       "status": "queued",
-      "wandb_id": null,
-      "expected_steps": 19050
+      "wandb_id": null
     }
   ]
 }
