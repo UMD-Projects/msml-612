@@ -2,6 +2,8 @@
   "_comment": "Source-of-truth list of ablation experiments and their TPU assignments. The supervisor reads this to decide which experiments to launch and watch.",
   "gcs_bucket": "msml612-diffusion-data",
   "wandb_project": "umd-projects/msml612-training",
+  "max_concurrent": 6,
+  "_max_concurrent_comment": "Hard cap on how many manifest experiments the supervisor will keep in provisioning/running state at the same time. Defense-in-depth on top of the per-zone TFRC_QUOTA check in supervisor.py.",
   "experiments": [
     {
       "name": "simple_dit",

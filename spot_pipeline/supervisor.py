@@ -80,6 +80,162 @@ def gcloud_tpu_state(tpu_name: str, zone: str) -> str:
     return out.strip() or "UNKNOWN"
 
 
+# ----- Quota tracking (defense-in-depth) -------------------------------------
+
+# TFRC quota grant. Keys are (zone, family, is_spot). family is one of
+# {"v4", "v5e", "v6e", "v5p"}. Values are total chip count for that bucket.
+# Source: TFRC grant email — keep in sync if the user's quota changes.
+TFRC_QUOTA = {
+    ("us-central2-b",   "v4",  False): 32,  # on-demand v4
+    ("us-central2-b",   "v4",  True):  32,  # spot v4
+    ("europe-west4-a",  "v6e", True):  64,  # spot v6e
+    ("us-east1-d",      "v6e", True):  64,  # spot v6e
+    ("europe-west4-b",  "v5e", True):  64,  # spot v5e
+    ("us-central1-a",   "v5e", True):  64,  # spot v5e
+}
+
+
+def parse_chip_count(accelerator_type: str) -> int:
+    """Return the number of chips in a TPU accelerator type string.
+
+    Examples:
+        v4-8 -> 8
+        v4-32 -> 32
+        v6e-4 -> 4
+        v5litepod-8 -> 8
+    """
+    m = re.search(r"-(\d+)$", accelerator_type)
+    if not m:
+        return 0
+    return int(m.group(1))
+
+
+def parse_family(accelerator_type: str) -> str:
+    """Return the chip family for an accelerator type string."""
+    if accelerator_type.startswith("v6e"):
+        return "v6e"
+    if accelerator_type.startswith("v5p"):
+        return "v5p"
+    if accelerator_type.startswith("v5e") or accelerator_type.startswith("v5litepod"):
+        return "v5e"
+    if accelerator_type.startswith("v4"):
+        return "v4"
+    if accelerator_type.startswith("v3"):
+        return "v3"
+    return "unknown"
+
+
+def list_chips_in_zone(zone: str) -> dict:
+    """Return chips currently used in a zone, broken down by (family, is_spot).
+
+    Counts both ACTIVE TPU VMs and queued resources that have or will allocate
+    chips. Chips in FAILED/SUSPENDED/preempted states do NOT count (GCP has
+    released them already).
+
+    Returns dict like {("v6e", True): 8, ("v4", False): 16}.
+    """
+    used = {}
+
+    # 1. Direct TPU VMs in the zone
+    code, out = run([
+        "gcloud", "compute", "tpus", "tpu-vm", "list",
+        f"--zone={zone}", "--format=json",
+    ])
+    if code == 0:
+        try:
+            tpus = json.loads(out)
+            for t in tpus:
+                state = t.get("state", "")
+                if state in ("DELETING", "PREEMPTED", "TERMINATED", "STOPPED", "SUSPENDED", "FAILED"):
+                    continue
+                acc = t.get("acceleratorType", "")
+                family = parse_family(acc)
+                chips = parse_chip_count(acc)
+                # spec.preemptible / preemptible flag varies by API version; check both
+                is_spot = bool(t.get("schedulingConfig", {}).get("preemptible") or
+                               t.get("schedulingConfig", {}).get("spot") or
+                               t.get("preemptible", False))
+                key = (family, is_spot)
+                used[key] = used.get(key, 0) + chips
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Queued resources in the zone (active ones consume quota even before
+    #    the underlying VM exists). Note that queued resources in
+    #    WAITING_FOR_RESOURCES do NOT yet hold quota — only ACTIVE/PROVISIONING
+    #    do. But we conservatively count all non-terminal queued resources.
+    code, out = run([
+        "gcloud", "compute", "tpus", "queued-resources", "list",
+        f"--zone={zone}", "--format=json",
+    ])
+    if code == 0:
+        try:
+            qrs = json.loads(out)
+            for qr in qrs:
+                state = qr.get("state", {}).get("state", "")
+                if state in ("FAILED", "SUSPENDED", "DELETING"):
+                    continue
+                # Skip queued resources whose underlying TPU we already counted above
+                node_specs = (qr.get("tpu", {}) or {}).get("nodeSpec", []) or []
+                for spec in node_specs:
+                    node = spec.get("node", {})
+                    node_id = spec.get("nodeId", "")
+                    acc = node.get("acceleratorType", "")
+                    if not acc:
+                        continue
+                    family = parse_family(acc)
+                    chips = parse_chip_count(acc)
+                    is_spot = bool(node.get("schedulingConfig", {}).get("preemptible") or
+                                   node.get("schedulingConfig", {}).get("spot"))
+                    # Don't double-count: only count queued resources whose
+                    # corresponding TPU VM doesn't exist yet (state != ACTIVE means
+                    # there's no VM, but ACTIVE means the VM was already counted above).
+                    if state == "ACTIVE":
+                        continue
+                    key = (family, is_spot)
+                    used[key] = used.get(key, 0) + chips
+        except json.JSONDecodeError:
+            pass
+
+    return used
+
+
+def quota_status(zone: str, family: str, is_spot: bool) -> tuple[int, int, int]:
+    """Return (used, quota, free) for a (zone, family, spot) bucket.
+
+    Returns (-1, -1, -1) if no TFRC quota record exists for this combination.
+    """
+    quota = TFRC_QUOTA.get((zone, family, is_spot), -1)
+    if quota < 0:
+        return (-1, -1, -1)
+    used_dict = list_chips_in_zone(zone)
+    used = used_dict.get((family, is_spot), 0)
+    return (used, quota, quota - used)
+
+
+def can_launch(zone: str, accelerator_type: str, is_spot: bool, log_prefix: str = "") -> tuple[bool, str]:
+    """Return (allowed, reason) for whether launching `accelerator_type` in `zone` is within quota.
+
+    Hard refuses if the request would push usage over TFRC_QUOTA. Returns True
+    with a reason like "ok: 8/64 used in europe-west4-a" if it fits.
+    """
+    family = parse_family(accelerator_type)
+    chips_needed = parse_chip_count(accelerator_type)
+    if chips_needed == 0:
+        return False, f"could not parse chip count from accelerator '{accelerator_type}'"
+
+    used, quota, free = quota_status(zone, family, is_spot)
+    if quota < 0:
+        return False, f"no TFRC_QUOTA record for ({zone}, {family}, spot={is_spot}); refusing as safety measure"
+
+    if chips_needed > free:
+        return False, (f"would exceed quota: need {chips_needed} {family} chips in {zone} "
+                       f"({'spot' if is_spot else 'on-demand'}), only {free}/{quota} free "
+                       f"(used {used}/{quota})")
+
+    return True, f"ok: would use {used + chips_needed}/{quota} {family} chips in {zone}"
+
+
 # ----- Experiment data model -------------------------------------------------
 
 @dataclass
@@ -107,17 +263,21 @@ class Manifest:
             data = json.load(f)
         self.gcs_bucket: str = data["gcs_bucket"]
         self.wandb_project: str = data["wandb_project"]
+        # Hard cap on total concurrently launching/running experiments. Default 6.
+        self.max_concurrent: int = int(data.get("max_concurrent", 6))
         self.experiments: list[Experiment] = [
             Experiment(**{k: v for k, v in e.items() if not k.startswith("_")})
             for e in data["experiments"] if not e.get("name", "").startswith("_")
         ]
-        self._extra = {k: v for k, v in data.items() if k not in ("gcs_bucket", "wandb_project", "experiments")}
+        self._extra = {k: v for k, v in data.items()
+                       if k not in ("gcs_bucket", "wandb_project", "experiments", "max_concurrent")}
 
     def save(self):
         out = {
             **self._extra,
             "gcs_bucket": self.gcs_bucket,
             "wandb_project": self.wandb_project,
+            "max_concurrent": self.max_concurrent,
             "experiments": [asdict(e) for e in self.experiments],
         }
         with open(self.path, "w") as f:
@@ -193,9 +353,67 @@ class Supervisor:
         self.dry_run = dry_run
         self.project_root = project_root or Path(__file__).resolve().parent.parent.parent
         self.launch_script = Path(__file__).parent / "launch_experiment.sh"
+        # Track chips committed in the CURRENT pass (gcloud queued-resources list
+        # may take a few seconds to reflect newly-submitted requests, so we add
+        # in-pass commitments to the quota check to avoid double-spending).
+        # Key: (zone, family, is_spot) -> chip count
+        self._pass_committed: dict = {}
+
+    def _count_active_experiments(self) -> int:
+        """Number of manifest experiments currently in provisioning/running state."""
+        return sum(1 for e in self.manifest.experiments
+                   if e.status in ("provisioning", "running"))
+
+    def _quota_check(self, exp: Experiment) -> tuple[bool, str]:
+        """Hard quota check before launching an experiment. Returns (ok, reason).
+
+        Combines:
+          - max_concurrent cap from manifest
+          - TFRC quota by zone × family × spot (live from gcloud)
+          - In-pass commitments (chips we've already submitted this supervisor pass)
+        """
+        # Layer 1: max_concurrent cap from the manifest
+        active = self._count_active_experiments()
+        if active >= self.manifest.max_concurrent:
+            return False, (f"max_concurrent={self.manifest.max_concurrent} reached "
+                           f"({active} provisioning/running)")
+
+        # Layer 2: TFRC quota by zone × family × spot
+        is_spot = True
+        family = parse_family(exp.accelerator)
+        chips_needed = parse_chip_count(exp.accelerator)
+        if chips_needed == 0:
+            return False, f"could not parse chip count from '{exp.accelerator}'"
+
+        used, quota, free = quota_status(exp.zone, family, is_spot)
+        if quota < 0:
+            return False, f"no TFRC_QUOTA record for ({exp.zone}, {family}, spot={is_spot})"
+
+        # Layer 3: include in-pass commitments (haven't propagated to gcloud list yet)
+        in_pass = self._pass_committed.get((exp.zone, family, is_spot), 0)
+        effective_used = used + in_pass
+        effective_free = quota - effective_used
+
+        if chips_needed > effective_free:
+            return False, (f"would exceed quota: need {chips_needed} {family} chips in {exp.zone} "
+                           f"(spot={is_spot}), only {effective_free}/{quota} free "
+                           f"(gcloud_used={used} + in_pass={in_pass})")
+
+        return True, (f"ok: would use {effective_used + chips_needed}/{quota} {family} chips in {exp.zone} "
+                      f"(gcloud_used={used} + in_pass={in_pass} + new={chips_needed})")
 
     def _launch(self, exp: Experiment) -> bool:
-        """Submit a queued resource request for an experiment via launch_experiment.sh."""
+        """Submit a queued resource request for an experiment via launch_experiment.sh.
+
+        Pre-flight: enforces max_concurrent, TFRC quota, and in-pass commitments.
+        Refuses to submit if the launch would exceed any limit.
+        """
+        ok, reason = self._quota_check(exp)
+        if not ok:
+            print(f"  REFUSED: {reason}")
+            return False
+        print(f"  OK: {reason}")
+
         cmd = [
             "bash", str(self.launch_script),
             "--experiment", exp.name,
@@ -205,13 +423,35 @@ class Supervisor:
             "--gcs-bucket", self.manifest.gcs_bucket,
         ]
         print(f"  $ {' '.join(cmd)}")
-        if self.dry_run:
-            return True
-        code, out = run(cmd)
-        if code != 0:
-            print(f"  Launch failed: {out[:300]}")
-            return False
+
+        if not self.dry_run:
+            code, out = run(cmd)
+            if code != 0:
+                print(f"  Launch failed: {out[:300]}")
+                return False
+
+        # Reserve chips in the in-pass committed counter so subsequent quota
+        # checks in this same pass don't double-spend.
+        family = parse_family(exp.accelerator)
+        chips = parse_chip_count(exp.accelerator)
+        key = (exp.zone, family, True)  # is_spot=True
+        self._pass_committed[key] = self._pass_committed.get(key, 0) + chips
         return True
+
+    def _print_quota_status(self):
+        """Log current TFRC quota usage on every pass."""
+        print("  Quota status:")
+        seen_zones = set()
+        for exp in self.manifest.experiments:
+            if exp.zone in seen_zones:
+                continue
+            seen_zones.add(exp.zone)
+            family = parse_family(exp.accelerator)
+            used, quota, free = quota_status(exp.zone, family, is_spot=True)
+            if quota >= 0:
+                print(f"    {exp.zone}/{family} (spot): {used}/{quota} chips used, {free} free")
+            else:
+                print(f"    {exp.zone}/{family} (spot): no TFRC_QUOTA record")
 
     def _delete_qr(self, exp: Experiment) -> bool:
         """Delete a queued resource (used when re-queuing after failure)."""
@@ -226,6 +466,12 @@ class Supervisor:
     def step(self):
         """Single supervision pass."""
         print(f"\n[{time.strftime('%H:%M:%S')}] Supervisor pass")
+        # Reset in-pass commitment counter at the start of every pass — gcloud
+        # will reflect committed chips by the next pass.
+        self._pass_committed = {}
+        self._print_quota_status()
+        active = self._count_active_experiments()
+        print(f"  Active experiments: {active}/{self.manifest.max_concurrent}")
         for exp in self.manifest.experiments:
             self._step_one(exp)
         if not self.dry_run:
