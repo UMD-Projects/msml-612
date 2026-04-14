@@ -11,20 +11,41 @@ export PATH=/home/mrwhite0racle/miniconda3/envs/flaxdiff/bin:$PATH
 cd /home/mrwhite0racle/research
 
 # -- Disk management: prevent wandb cache from filling root disk --
+#
+# IMPORTANT: This watchdog must NEVER touch ~/.cache/wandb/ — wandb writes
+# active run state and artifact downloads there, and racing the trainer caused
+# FileNotFoundError crashes mid-training (run wg46wnui, ep ~41). Instead, we
+# point WANDB_CACHE_DIR at a tmp location and use the official `wandb artifact
+# cache cleanup` CLI which respects in-flight downloads.
 export WANDB_CACHE_DIR=/tmp/wandb-cache
 mkdir -p "$WANDB_CACHE_DIR"
 
 cleanup_wandb_cache() {
     while true; do
+        # Sleep first so we don't race the wandb init at training startup
+        sleep 600  # 10 minutes between checks
         usage=$(df / --output=pcent | tail -1 | tr -d ' %')
-        if [ "$usage" -gt 80 ]; then
-            before=$(du -sm "${WANDB_CACHE_DIR}" 2>/dev/null | cut -f1)
-            rm -rf "${WANDB_CACHE_DIR}/artifacts/" 2>/dev/null
-            rm -rf "${HOME}/.cache/wandb/" 2>/dev/null
-            mkdir -p "$WANDB_CACHE_DIR"
-            echo "[$(date)] Cleaned wandb cache (was ${before:-?}MB, disk was ${usage}%)" >> /tmp/disk_watchdog.log
+        if [ "$usage" -le 75 ]; then
+            continue  # plenty of headroom, do nothing
         fi
-        sleep 300
+        before=$(du -sm "${WANDB_CACHE_DIR}" 2>/dev/null | cut -f1)
+        # Use wandb's official cache cleanup which respects in-flight artifacts.
+        # Cap the cache to 5GB; wandb deletes oldest artifacts beyond that.
+        if /home/mrwhite0racle/miniconda3/envs/flaxdiff/bin/wandb artifact cache cleanup 5GB \
+                >> /tmp/disk_watchdog.log 2>&1; then
+            after=$(du -sm "${WANDB_CACHE_DIR}" 2>/dev/null | cut -f1)
+            echo "[$(date)] wandb artifact cache cleanup: ${before:-?}MB -> ${after:-?}MB (disk was ${usage}%)" \
+                >> /tmp/disk_watchdog.log
+        else
+            # Fallback if `wandb artifact cache cleanup` is unavailable: only
+            # touch our tmp WANDB_CACHE_DIR, NEVER touch ~/.cache/wandb/.
+            # Delete files older than 30 minutes to avoid touching anything
+            # the trainer is actively using.
+            find "${WANDB_CACHE_DIR}" -type f -mmin +30 -delete 2>/dev/null || true
+            after=$(du -sm "${WANDB_CACHE_DIR}" 2>/dev/null | cut -f1)
+            echo "[$(date)] fallback cleanup: ${before:-?}MB -> ${after:-?}MB (disk was ${usage}%)" \
+                >> /tmp/disk_watchdog.log
+        fi
     done
 }
 cleanup_wandb_cache &
