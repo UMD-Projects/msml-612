@@ -26,6 +26,7 @@ SPOT="--spot"
 QUEUED=true
 WANDB_KEY=""
 HF_TOKEN=""
+EXTRA_CLI_ARGS=""
 
 # -- Parse args ---------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -40,6 +41,7 @@ while [[ $# -gt 0 ]]; do
         --no-queued)     QUEUED=false; shift ;;
         --wandb-key)     WANDB_KEY="$2"; shift 2 ;;
         --hf-token)      HF_TOKEN="$2"; shift 2 ;;
+        --extra-cli-args) EXTRA_CLI_ARGS="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -94,7 +96,7 @@ echo "==================================================================="
 # experiment_name, gcs_bucket, wandb_api_key, hf_token.
 METADATA_ARGS=(
     "--metadata-from-file=startup-script=$BOOTSTRAP_SH"
-    "--metadata=experiment_name=$EXPERIMENT_NAME,gcs_bucket=$GCS_BUCKET,wandb_api_key=$WANDB_KEY,hf_token=$HF_TOKEN"
+    "--metadata=^~^experiment_name=$EXPERIMENT_NAME~gcs_bucket=$GCS_BUCKET~wandb_api_key=$WANDB_KEY~hf_token=$HF_TOKEN~extra_cli_args=$EXTRA_CLI_ARGS"
 )
 
 if [[ "$QUEUED" == "true" ]]; then

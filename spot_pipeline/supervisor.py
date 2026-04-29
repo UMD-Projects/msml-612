@@ -302,18 +302,34 @@ def find_wandb_run_for_experiment(project: str, experiment_name: str) -> Optiona
     except ImportError:
         return None
 
-    # Map manifest experiment name → (arch path component, ssm ratio or None)
+    # Map manifest experiment name → (arch path component, ssm ratio or None).
+    # The arch path component is what appears in the wandb run name as `arch-<x>/`
+    # Note: in training.py, '+2d' is PARSED OUT before the arch-string is logged,
+    # so Direction α runs appear with the same arch path as their non-2d twins
+    # (e.g. 'hybrid_dit+2d+hilbert_3to1' → arch-hybrid_dit+hilbert/ in the run
+    # name). To disambiguate, the supervisor relies on a new use_2d_fusion=True
+    # config field (handled via the config-matching fallback below).
     name_to_arch = {
-        "simple_dit":                 ("simple_dit",          None),
-        "simple_dit+hilbert":         ("simple_dit+hilbert",  None),
-        "hybrid_dit_3to1":            ("hybrid_dit",          "3:1"),
-        "hybrid_dit+hilbert_3to1":    ("hybrid_dit+hilbert",  "3:1"),
-        "hybrid_dit+hilbert_1to1":    ("hybrid_dit+hilbert",  "1:1"),
-        "hybrid_dit+hilbert_all_ssm": ("hybrid_dit+hilbert",  "all-ssm"),
+        "simple_dit":                        ("simple_dit",          None, False),
+        "simple_dit+hilbert":                ("simple_dit+hilbert",  None, False),
+        "simple_dit+zigzag":                 ("simple_dit+zigzag",   None, False),
+        "hybrid_dit_3to1":                   ("hybrid_dit",          "3:1", False),
+        "hybrid_dit+hilbert_3to1":           ("hybrid_dit+hilbert",  "3:1", False),
+        "hybrid_dit+hilbert_1to1":           ("hybrid_dit+hilbert",  "1:1", False),
+        "hybrid_dit+hilbert_all_ssm":        ("hybrid_dit+hilbert",  "all-ssm", False),
+        "hybrid_dit+zigzag_3to1":            ("hybrid_dit+zigzag",   "3:1", False),
+        "hybrid_dit+zigzag_1to1":            ("hybrid_dit+zigzag",   "1:1", False),
+        # Direction α — Spatial-Mamba-style 2D state fusion
+        "hybrid_dit+2d_3to1":                ("hybrid_dit",          "3:1", True),
+        "hybrid_dit+2d+hilbert_3to1":        ("hybrid_dit+hilbert",  "3:1", True),
+        "hybrid_dit+2d+zigzag_3to1":         ("hybrid_dit+zigzag",   "3:1", True),
+        "hybrid_dit+2d_1to1":                ("hybrid_dit",          "1:1", True),
+        "hybrid_dit+2d_all_ssm":             ("hybrid_dit",          "all-ssm", True),
+        "hybrid_dit+2d+hilbert_all_ssm":     ("hybrid_dit+hilbert",  "all-ssm", True),
     }
     if experiment_name not in name_to_arch:
         return None
-    target_arch, target_ratio = name_to_arch[experiment_name]
+    target_arch, target_ratio, target_use_2d = name_to_arch[experiment_name]
 
     api = wandb.Api()
     runs = list(api.runs(project, order="-created_at"))
@@ -323,16 +339,27 @@ def find_wandb_run_for_experiment(project: str, experiment_name: str) -> Optiona
         if name.startswith("old-"):
             continue
 
-        # Match `arch-<exact_arch>/` (use trailing slash since name uses path encoding)
-        # so `arch-simple_dit/` doesn't match `arch-simple_dit+hilbert/`.
-        if re.search(rf"arch-{re.escape(target_arch)}/", name) is None:
+        # Check run name contains the target arch path AND '2d' presence matches.
+        # Direction α runs log arch-<target_arch>+2d+<scan>/ in their name even
+        # though internally the '+2d' is parsed out of the arch_name string.
+        # We detect that by looking for '+2d' in the run name directly.
+        has_2d_in_name = "+2d" in name
+        if target_use_2d and not has_2d_in_name:
+            continue
+        if not target_use_2d and has_2d_in_name:
+            continue
+
+        # Match `arch-<exact_arch>` (may be followed by `+2d+...` suffix)
+        if re.search(rf"arch-{re.escape(target_arch)}(\+|/)", name) is None:
             continue
 
         # If the architecture has an SSM ratio, verify it matches via run config.
         if target_ratio is not None:
-            cfg_ratio = (r.config or {}).get("ssm_attention_ratio")
+            cfg = r.config or {}
+            args = cfg.get("arguments", {}) if isinstance(cfg.get("arguments"), dict) else {}
+            cfg_ratio = args.get("ssm_attention_ratio") or cfg.get("ssm_attention_ratio")
             if cfg_ratio is None:
-                cfg_ratio = (r.config or {}).get("model", {}).get("ssm_attention_ratio")
+                cfg_ratio = cfg.get("model", {}).get("ssm_attention_ratio")
             if cfg_ratio != target_ratio:
                 continue
 

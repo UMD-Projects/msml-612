@@ -1,0 +1,13 @@
+{
+  "wandb_id": "xf18pnxa",
+  "n_samples": 1024,
+  "n_ref": 8189,
+  "elapsed_sec": 59.71201968193054,
+  "metrics": {
+    "inception_score_mean": 3.969627,
+    "inception_score_std": 0.3417741,
+    "frechet_inception_distance": 35.74794,
+    "kernel_inception_distance_mean": 0.01019783,
+    "kernel_inception_distance_std": 0.0005626787
+  }
+}

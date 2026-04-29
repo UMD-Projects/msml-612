@@ -1,0 +1,13 @@
+{
+  "wandb_id": "azioyhka",
+  "n_samples": 1024,
+  "n_ref": 8189,
+  "elapsed_sec": 57.68950057029724,
+  "metrics": {
+    "inception_score_mean": 3.959177,
+    "inception_score_std": 0.3183421,
+    "frechet_inception_distance": 35.01698,
+    "kernel_inception_distance_mean": 0.009486117,
+    "kernel_inception_distance_std": 0.000595655
+  }
+}
